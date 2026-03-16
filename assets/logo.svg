@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- DogEar logo: a folded page corner representing a bookmarked document -->
+  <rect x="16" y="8" width="80" height="96" rx="4" ry="4" fill="#4A90D9" />
+  <polygon points="96,8 96,32 120,32" fill="#2C5F8A" />
+  <rect x="96" y="8" width="24" height="24" rx="0" ry="0" fill="#6BB3F0" opacity="0.7" />
+  <!-- folded corner crease -->
+  <line x1="96" y1="8" x2="120" y2="32" stroke="#2C5F8A" stroke-width="2" />
+  <!-- bookmark lines -->
+  <rect x="28" y="40" width="48" height="6" rx="3" fill="#ffffff" opacity="0.8" />
+  <rect x="28" y="54" width="36" height="6" rx="3" fill="#ffffff" opacity="0.6" />
+  <rect x="28" y="68" width="44" height="6" rx="3" fill="#ffffff" opacity="0.6" />
+  <rect x="28" y="82" width="28" height="6" rx="3" fill="#ffffff" opacity="0.4" />
+</svg>
