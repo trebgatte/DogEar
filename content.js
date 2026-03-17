@@ -17,13 +17,6 @@
   const STORAGE_AI_MODEL = "tgpt_turn_nav_ai_model_v121";
   const STORAGE_TRACK_CURRENT = "tgpt_turn_nav_track_current_v121";
 
-  // [FIX 7] Max chars to hash for cache keys — avoids hashing huge turn bodies
-  const HASH_PREFIX_LEN = 200;
-  // [FIX 3] Max chars to run regex classification against
-  const CLASSIFY_PREFIX_LEN = 500;
-  // [FIX 1] Max concurrent AI requests
-  const AI_CONCURRENCY = 3;
-
   function storageGet(key, fallback) {
     return new Promise((resolve) => {
       try {
@@ -59,6 +52,7 @@
   function cleanText(str) {
     return String(str || "")
       .replace(/\s+/g, " ")
+      .replace(/[ \t]+/g, " ")
       .trim();
   }
 
@@ -66,8 +60,7 @@
     return cleanText(el?.innerText || el?.textContent || "");
   }
 
-  // [FIX 2] inferRole now accepts pre-computed text to avoid redundant innerText reads
-  function inferRole(el, precomputedText) {
+  function inferRole(el) {
     if (
       el.getAttribute("data-message-author-role") === "user" ||
       el.querySelector("[data-message-author-role='user']")
@@ -78,13 +71,10 @@
       el.querySelector("[data-message-author-role='assistant']")
     ) return "assistant";
 
-    // Reuse already-computed text instead of calling getText again
-    const txt = (precomputedText || "").toLowerCase();
+    const txt = getText(el).toLowerCase();
     if (txt.startsWith("you said:") || txt.startsWith("you")) return "user";
     if (txt.startsWith("chatgpt")) return "assistant";
 
-    // [FIX 9] getBoundingClientRect is a last resort — still needed but now only
-    // fires when data-attributes AND text heuristics both fail
     const rect = el.getBoundingClientRect();
     return rect.left > window.innerWidth * 0.35 ? "user" : "assistant";
   }
@@ -125,15 +115,6 @@
     }
   }
 
-  // [FIX 6] Debounce helper for search input
-  function debounce(fn, ms) {
-    let timer;
-    return (...args) => {
-      clearTimeout(timer);
-      timer = setTimeout(() => fn(...args), ms);
-    };
-  }
-
   function buildDescriptorPrompt(prevText, text, nextText, role) {
     const clip = (v, n = 1800) => String(v || "").slice(0, n);
 
@@ -155,7 +136,6 @@
     ].join("\n");
   }
 
-  // [FIX 3] Run regex classification against a truncated prefix instead of full text
   function summarizeTurn(text, role, prevTurnText = "") {
     const raw = cleanText(text);
     const prev = cleanText(prevTurnText);
@@ -165,36 +145,33 @@
     const firstSentence = splitSentences(raw)[0] || raw;
     const first = truncate(stripLeadIns(firstSentence), 72);
 
-    // Only scan the first CLASSIFY_PREFIX_LEN chars for pattern detection
-    const sample = raw.slice(0, CLASSIFY_PREFIX_LEN);
-
-    const codeFenceCount = (sample.match(/```/g) || []).length;
+    const codeFenceCount = (raw.match(/```/g) || []).length;
     const hasHeavyCode =
       codeFenceCount >= 2 ||
-      /function\s+\w+\s*\(|const\s+\w+\s*=|let\s+\w+\s*=|class\s+\w+|=>|chrome\.|document\.|querySelector|addEventListener|manifest_version/i.test(sample);
+      /function\s+\w+\s*\(|const\s+\w+\s*=|let\s+\w+\s*=|class\s+\w+|=>|chrome\.|document\.|querySelector|addEventListener|manifest_version/i.test(raw);
 
     const hasConfigShape =
-      /"manifest_version"\s*:|permissions"\s*:|host_permissions"\s*:|background"\s*:|action"\s*:|manifest_version/i.test(sample);
+      /"manifest_version"\s*:|permissions"\s*:|host_permissions"\s*:|background"\s*:|action"\s*:|manifest_version/i.test(raw);
 
     const hasUiConstruction =
-      /createElement|appendChild|className\s*=|style\.|innerHTML|textContent|DRAWER_ID|BTN_ID|MINI_ID/i.test(sample);
+      /createElement|appendChild|className\s*=|style\.|innerHTML|textContent|DRAWER_ID|BTN_ID|MINI_ID/i.test(raw);
 
     const hasNavigationLogic =
-      /scrollIntoView|IntersectionObserver|jumpToTurn|jumpRelative|currentId|observeCurrentTurn/i.test(sample);
+      /scrollIntoView|IntersectionObserver|jumpToTurn|jumpRelative|currentId|observeCurrentTurn/i.test(raw);
 
     const hasStorageLogic =
-      /chrome\.storage\.local|storageGet|storageSet|localStorage|getItem|setItem/i.test(sample);
+      /chrome\.storage\.local|storageGet|storageSet|localStorage|getItem|setItem/i.test(raw);
 
     const hasRefreshLogic =
-      /MutationObserver|refreshTurns|observeDOM|setTimeout\(refreshTurns/i.test(sample);
+      /MutationObserver|refreshTurns|observeDOM|setTimeout\(refreshTurns/i.test(raw);
 
     const hasMessaging =
-      /chrome\.runtime\.onMessage|chrome\.tabs\.sendMessage|sendMessage|onClicked/i.test(sample);
+      /chrome\.runtime\.onMessage|chrome\.tabs\.sendMessage|sendMessage|onClicked/i.test(raw);
 
-    const asksQuestion = sample.includes("?");
-    const asksForBuild = /\b(build|create|make|implement|add|update|patch|fix)\b/i.test(sample);
-    const asksForWriting = /\b(rewrite|draft|respond|email|post|prompt)\b/i.test(sample);
-    const asksForExplanation = /\b(how|why|what would it take|is there another way|can you explain)\b/i.test(sample);
+    const asksQuestion = raw.includes("?");
+    const asksForBuild = /\b(build|create|make|implement|add|update|patch|fix)\b/i.test(raw);
+    const asksForWriting = /\b(rewrite|draft|respond|email|post|prompt)\b/i.test(raw);
+    const asksForExplanation = /\b(how|why|what would it take|is there another way|can you explain)\b/i.test(raw);
 
     if (role === "user") {
       if (asksQuestion && asksForExplanation) return truncate("Asks for approach: " + first, 78);
@@ -211,14 +188,14 @@
       if (hasRefreshLogic) return "Implements refresh/update logic";
       if (hasNavigationLogic) return "Adds turn navigation behavior";
       if (hasUiConstruction) return "Builds injected navigator UI";
-      if (hasHeavyCode && /content\.js|background\.js|manifest\.json/i.test((prev + " " + sample).slice(0, CLASSIFY_PREFIX_LEN * 2))) {
+      if (hasHeavyCode && /content\.js|background\.js|manifest\.json/i.test(prev + " " + raw)) {
         return "Provides implementation for requested extension file";
       }
       if (hasHeavyCode) return "Provides implementation details";
-      if (/\b(recommend|best approach|right move|should)\b/i.test(sample)) {
+      if (/\b(recommend|best approach|right move|should)\b/i.test(raw)) {
         return truncate("Recommends: " + first, 78);
       }
-      if (/\b(explain|because|reason|tradeoff|limit)\b/i.test(sample)) {
+      if (/\b(explain|because|reason|tradeoff|limit)\b/i.test(raw)) {
         return truncate("Explains: " + first, 78);
       }
       return truncate("Assistant: " + first, 78);
@@ -242,7 +219,6 @@
     return [];
   }
 
-  // [FIX 2] getText is called once per node; the result is passed into inferRole
   function getConversationTurns() {
     const nodes = getMessageNodes();
     const turns = [];
@@ -255,7 +231,7 @@
       const text = getText(node);
       if (!text || text.length < 2) return;
 
-      const role = inferRole(node, text);
+      const role = inferRole(node);
       const prevTurnText = turns.length ? turns[turns.length - 1].text : "";
       const turnId = "turn-" + (idx + 1);
 
@@ -267,8 +243,6 @@
         role,
         defaultLabel: summarizeTurn(text, role, prevTurnText),
         text,
-        // [FIX 6] Pre-compute lowercase search text once at extraction time
-        searchText: (text + " " + (turnId)).toLowerCase(),
         node
       });
     });
@@ -614,24 +588,23 @@
       aiModel: await storageGet(STORAGE_AI_MODEL, ""),
       aiCache: await storageGet(STORAGE_AI_CACHE, {}),
       aiInFlight: new Set(),
-      trackCurrent: await storageGet(STORAGE_TRACK_CURRENT, false),
-      // [FIX 8] Guard against duplicate AI batch runs
-      aiBatchRunning: false
+      trackCurrent: await storageGet(STORAGE_TRACK_CURRENT, false)
     };
 
     let drawer, listEl, searchEl, chips = {}, mini;
+    let urlPollInterval = null;
+    let lastKnownUrl = location.href;
 
     function effectiveLabel(turn) {
       return state.titles[turn.id] || turn.defaultLabel;
     }
 
-    // [FIX 7] Hash truncated prefixes instead of full turn text
     function turnCacheKey(turn, prevText = "", nextText = "") {
       return hashText([
         turn.role,
-        prevText.slice(0, HASH_PREFIX_LEN),
-        turn.text.slice(0, HASH_PREFIX_LEN),
-        nextText.slice(0, HASH_PREFIX_LEN)
+        prevText,
+        turn.text,
+        nextText
       ].join("\n---\n"));
     }
 
@@ -670,7 +643,7 @@
         };
 
         state.aiCache[cacheKey] = result;
-        // [FIX 1] Don't persist here — batch caller will persist once at the end
+        await persistAiCache();
         return result;
       } catch {
         return null;
@@ -679,86 +652,36 @@
       }
     }
 
-    // [FIX 1] Concurrent AI requests with a concurrency limiter, single cache persist
     async function runAiDescriptorsForVisibleTurns(limit = 24) {
       if (!state.aiMode || !state.turns.length) return;
 
-      // [FIX 8] Prevent duplicate batch runs
-      if (state.aiBatchRunning) return;
-      state.aiBatchRunning = true;
+      const batch = state.turns.slice(0, limit);
+      let changed = false;
 
-      try {
-        const batch = state.turns.slice(0, limit);
-        let changed = false;
+      for (let i = 0; i < batch.length; i++) {
+        const turn = batch[i];
+        const prevText = i > 0 ? batch[i - 1].text : "";
+        const nextText = i < batch.length - 1 ? batch[i + 1].text : "";
 
-        // First pass: apply anything already cached (synchronous, fast)
-        for (let i = 0; i < batch.length; i++) {
-          const turn = batch[i];
-          const prevText = i > 0 ? batch[i - 1].text : "";
-          const nextText = i < batch.length - 1 ? batch[i + 1].text : "";
-          const cacheKey = turnCacheKey(turn, prevText, nextText);
-
-          if (state.aiCache[cacheKey]?.label) {
-            if (state.titles[turn.id] !== state.aiCache[cacheKey].label) {
-              state.titles[turn.id] = state.aiCache[cacheKey].label;
-              changed = true;
-            }
+        const cacheKey = turnCacheKey(turn, prevText, nextText);
+        if (state.aiCache[cacheKey]?.label) {
+          if (state.titles[turn.id] !== state.aiCache[cacheKey].label) {
+            state.titles[turn.id] = state.aiCache[cacheKey].label;
+            changed = true;
           }
+          continue;
         }
 
-        if (changed) {
-          await storageSet(STORAGE_TITLES, state.titles);
-          if (state.open) renderList();
-          changed = false;
+        const result = await summarizeTurnWithAI(turn, prevText, nextText);
+        if (result?.label && state.titles[turn.id] !== result.label) {
+          state.titles[turn.id] = result.label;
+          changed = true;
         }
+      }
 
-        // Second pass: fetch uncached labels with bounded concurrency
-        const uncached = [];
-        for (let i = 0; i < batch.length; i++) {
-          const turn = batch[i];
-          const prevText = i > 0 ? batch[i - 1].text : "";
-          const nextText = i < batch.length - 1 ? batch[i + 1].text : "";
-          const cacheKey = turnCacheKey(turn, prevText, nextText);
-
-          if (!state.aiCache[cacheKey]?.label) {
-            uncached.push({ turn, prevText, nextText });
-          }
-        }
-
-        if (uncached.length) {
-          // Process in chunks of AI_CONCURRENCY
-          for (let start = 0; start < uncached.length; start += AI_CONCURRENCY) {
-            const chunk = uncached.slice(start, start + AI_CONCURRENCY);
-            const results = await Promise.allSettled(
-              chunk.map(({ turn, prevText, nextText }) =>
-                summarizeTurnWithAI(turn, prevText, nextText)
-                  .then((result) => ({ turn, result }))
-              )
-            );
-
-            for (const settled of results) {
-              if (settled.status !== "fulfilled") continue;
-              const { turn, result } = settled.value;
-              if (result?.label && state.titles[turn.id] !== result.label) {
-                state.titles[turn.id] = result.label;
-                changed = true;
-              }
-            }
-
-            // Render incrementally after each chunk so labels appear progressively
-            if (changed && state.open) {
-              renderList();
-            }
-          }
-
-          // [FIX 1] Single cache persist after all requests complete
-          if (changed) {
-            await storageSet(STORAGE_TITLES, state.titles);
-            await persistAiCache();
-          }
-        }
-      } finally {
-        state.aiBatchRunning = false;
+      if (changed) {
+        await storageSet(STORAGE_TITLES, state.titles);
+        if (state.open) renderList();
       }
     }
 
@@ -787,32 +710,11 @@
       }
     }
 
-    // [FIX 4] Targeted DOM update helpers — avoid full re-render for single-item changes
-
-    function updateBookmarkStar(turnId) {
-      if (!listEl) return;
-      // Find all items and update just the star button text
-      const items = listEl.querySelectorAll(".tgpt-item");
-      for (const item of items) {
-        const main = item.querySelector(".tgpt-main");
-        if (!main) continue;
-        // Match by checking the meta text which includes turn index
-        const star = item.querySelector(".tgpt-icon-btn");
-        if (star) {
-          // We need a reliable way to match turn IDs to DOM items.
-          // Since we rebuild on bookmark toggle (sections change), fall through to renderAll.
-        }
-      }
-    }
-
     async function toggleBookmark(turnId) {
       if (state.bookmarks[turnId]) delete state.bookmarks[turnId];
       else state.bookmarks[turnId] = true;
       await storageSet(STORAGE_BOOKMARKS, state.bookmarks);
-      // Bookmarks change section membership, so a list re-render is needed,
-      // but we can skip the mini-map rebuild if mini is disabled.
-      renderList();
-      if (state.miniEnabled) renderMini();
+      renderAll();
     }
 
     async function editNote(turnId) {
@@ -822,8 +724,7 @@
       if (next.trim()) state.notes[turnId] = next.trim();
       else delete state.notes[turnId];
       await storageSet(STORAGE_NOTES, state.notes);
-      // Only the list needs updating — mini-map doesn't show notes
-      renderList();
+      renderAll();
     }
 
     async function renameTurn(turnId) {
@@ -835,13 +736,9 @@
       if (next.trim()) state.titles[turnId] = next.trim();
       else delete state.titles[turnId];
       await storageSet(STORAGE_TITLES, state.titles);
-      // Only the list needs updating — mini-map tooltips use effectiveLabel
-      // but rebuilding mini for a rename is overkill. Tooltip updates on next renderMini.
-      renderList();
+      renderAll();
     }
 
-    // [FIX 6] Use pre-computed searchText; notes and labels are appended at filter time
-    //         but the heavy turn body is pre-lowercased.
     function filteredTurns() {
       return state.turns.filter((turn) => {
         if (state.filter === "user" && turn.role !== "user") return false;
@@ -850,15 +747,10 @@
 
         if (state.search) {
           const q = state.search.toLowerCase();
-          // searchText is pre-lowercased turn body. Append label + notes on the fly
-          // (these are short strings, so the cost is trivial).
-          const label = effectiveLabel(turn).toLowerCase();
-          const note = (state.notes[turn.id] || "").toLowerCase();
-          if (
-            !turn.searchText.includes(q) &&
-            !label.includes(q) &&
-            !note.includes(q)
-          ) return false;
+          const hay = (
+            effectiveLabel(turn) + " " + turn.text + " " + (state.notes[turn.id] || "")
+          ).toLowerCase();
+          if (!hay.includes(q)) return false;
         }
         return true;
       });
@@ -870,11 +762,17 @@
       drawer.classList.add(state.layout === "bottom" ? "layout-bottom" : "layout-right");
     }
 
+    function scheduleOpenRefresh() {
+      setTimeout(() => refreshTurns(), 50);
+    }
+
     function openDrawer() {
       drawer.classList.add("open");
       state.open = true;
-      // [FIX 8] Single refresh path — refreshTurns already triggers AI descriptors
-      setTimeout(() => refreshTurns(), 50);
+      scheduleOpenRefresh();
+      if (state.aiMode) {
+        idle(() => runAiDescriptorsForVisibleTurns());
+      }
     }
 
     function closeDrawer() {
@@ -888,37 +786,8 @@
       turn.node.classList.add("tgpt-highlight-target");
       turn.node.scrollIntoView({ behavior: "smooth", block: "center" });
       setTimeout(() => turn.node.classList.remove("tgpt-highlight-target"), 1800);
-      // [FIX 4] Only update current-highlight styling, not the whole mini-map
-      updateCurrentHighlight(turn.id);
+      renderAll();
       if (state.layout === "bottom") closeDrawer();
-    }
-
-    // [FIX 4] Lightweight current-turn highlight update
-    function updateCurrentHighlight(newCurrentId) {
-      if (!listEl) return;
-
-      // Update list items
-      const items = listEl.querySelectorAll(".tgpt-item");
-      items.forEach((item) => {
-        // We store turn id on the element for efficient matching
-        if (item.dataset.turnId === newCurrentId) {
-          item.classList.add("current");
-        } else {
-          item.classList.remove("current");
-        }
-      });
-
-      // Update mini-map dots
-      if (state.miniEnabled && mini) {
-        const dots = mini.querySelectorAll(".tgpt-mini-dot");
-        dots.forEach((dot) => {
-          if (dot.dataset.turnId === newCurrentId) {
-            dot.classList.add("current");
-          } else {
-            dot.classList.remove("current");
-          }
-        });
-      }
     }
 
     function getCurrentIndex() {
@@ -1000,7 +869,6 @@
       }
     }
 
-    // [FIX 4] renderSection now stamps data-turn-id on items for targeted updates
     function renderSection(title, key, turns, container) {
       if (!turns.length) return;
 
@@ -1027,7 +895,6 @@
         turns.forEach((turn) => {
           const item = document.createElement("div");
           item.className = "tgpt-item" + (turn.id === state.currentId ? " current" : "");
-          item.dataset.turnId = turn.id;
 
           const row = document.createElement("div");
           row.className = "tgpt-row";
@@ -1127,7 +994,6 @@
       }
     }
 
-    // [FIX 5] renderMini stamps data-turn-id on dots for targeted updates
     function renderMini() {
       document.getElementById(MINI_ID)?.remove();
       if (!state.miniEnabled) return;
@@ -1155,7 +1021,6 @@
           (state.bookmarks[turn.id] ? " bookmarked" : "") +
           (turn.id === state.currentId ? " current" : "");
 
-        dot.dataset.turnId = turn.id;
         dot.style.top = `calc(${(pct * 100).toFixed(3)}% - 2px)`;
         dot.style.height = `${dotHeight}px`;
         dot.title = `Turn ${turn.index}: ${effectiveLabel(turn)}`;
@@ -1169,8 +1034,7 @@
 
     function renderAll() {
       renderList();
-      // [FIX 5] Only rebuild mini-map if it's enabled
-      if (state.miniEnabled) renderMini();
+      renderMini();
     }
 
     function observeCurrentTurn() {
@@ -1188,8 +1052,7 @@
         const match = state.turns.find((t) => t.node === visible[0].target);
         if (match && match.id !== state.currentId) {
           state.currentId = match.id;
-          // [FIX 4] Use targeted highlight update instead of full renderList
-          updateCurrentHighlight(match.id);
+          renderList();
         }
       }, { root: null, threshold: [0.5] });
 
@@ -1199,16 +1062,22 @@
     function refreshTurns() {
       const previousCurrent = state.currentId;
       state.turns = getConversationTurns();
-      if (!state.turns.length) return;
+
+      if (!state.turns.length) {
+        // Conversation may still be loading after a navigation —
+        // clear stale UI so old turns don't linger.
+        state.currentId = null;
+        renderAll();
+        return;
+      }
 
       if (!state.turns.find((t) => t.id === previousCurrent)) {
-        state.currentId = previousCurrent || state.turns[0].id;
+        state.currentId = state.turns[0].id;
       }
 
       renderAll();
       observeCurrentTurn();
 
-      // [FIX 8] Single AI trigger point — openDrawer no longer duplicates this
       if (state.aiMode && state.open) {
         idle(() => runAiDescriptorsForVisibleTurns());
       }
@@ -1268,12 +1137,10 @@
       searchEl = document.createElement("input");
       searchEl.className = "tgpt-search";
       searchEl.placeholder = "Search turns";
-      // [FIX 6] Debounced search input — 180ms delay prevents per-keystroke re-renders
-      const debouncedSearch = debounce(() => {
+      searchEl.addEventListener("input", () => {
         state.search = searchEl.value.trim();
         renderList();
-      }, 180);
-      searchEl.addEventListener("input", debouncedSearch);
+      });
 
       const filters = document.createElement("div");
       filters.className = "tgpt-filters";
@@ -1425,10 +1292,34 @@
       document.addEventListener("keydown", state.keyHandler, true);
     }
 
+    function startUrlPolling() {
+      // ChatGPT is an SPA — URL changes happen via the History API with no
+      // page reload.  Poll for href changes and auto-refresh when detected.
+      if (urlPollInterval) clearInterval(urlPollInterval);
+
+      urlPollInterval = setInterval(() => {
+        if (location.href !== lastKnownUrl) {
+          lastKnownUrl = location.href;
+          // Small delay so the new conversation DOM has time to mount
+          setTimeout(() => {
+            refreshTurns();
+            // If the DOM wasn't ready yet, retry once more
+            if (!state.turns.length) {
+              setTimeout(() => refreshTurns(), 1500);
+            }
+          }, 600);
+        }
+      }, 800);
+    }
+
     function destroy() {
       try { state.io && state.io.disconnect(); } catch {}
       if (state.keyHandler) {
         document.removeEventListener("keydown", state.keyHandler, true);
+      }
+      if (urlPollInterval) {
+        clearInterval(urlPollInterval);
+        urlPollInterval = null;
       }
       document.getElementById(DRAWER_ID)?.remove();
       document.getElementById(BTN_ID)?.remove();
@@ -1439,6 +1330,7 @@
     window[APP_ID] = { destroy };
     buildUI();
     registerKeyboardShortcuts();
+    startUrlPolling();
   }
 
   chrome.runtime.onMessage.addListener((msg) => {

@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.2] - 2026-03-17
+
+### Added
+- URL change detection: navigator auto-refreshes when switching ChatGPT conversations
+- Retry on navigation: if DOM isn't ready after a conversation switch, retries after 1.5s
+
+### Fixed
+- Refresh button now clears stale turns when the DOM returns empty instead of silently bailing
+- Switching conversations no longer leaves previous chat's turns in the navigator
+- `currentId` properly resets to first turn (not stale previous ID) after navigation
+
 ## [1.2.1] - 2026-03-16
 
 ### Added
