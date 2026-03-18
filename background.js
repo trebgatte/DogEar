@@ -110,7 +110,8 @@ chrome.action.onClicked.addListener(async (tab) => {
   const url = tab.url || "";
   const allowed =
     url.startsWith("https://chatgpt.com/") ||
-    url.startsWith("https://chat.openai.com/");
+    url.startsWith("https://chat.openai.com/") ||
+    url.startsWith("https://claude.ai/");
   if (!allowed) return;
 
   try {

@@ -1,13 +1,26 @@
 (() => {
-  const APP_ID = "__chatgpt_turn_nav_v121_chrome__";
-  const DRAWER_ID = "tgpt-turn-nav-drawer";
-  const BTN_ID = "tgpt-turn-nav-button";
-  const MINI_ID = "tgpt-turn-nav-mini";
-  const STYLE_ID = "tgpt-turn-nav-style";
+  const APP_ID = "__dogear_turn_nav_v130_chrome__";
+  const DRAWER_ID = "dogear-turn-nav-drawer";
+  const BTN_ID = "dogear-turn-nav-button";
+  const MINI_ID = "dogear-turn-nav-mini";
+  const STYLE_ID = "dogear-turn-nav-style";
 
-  const STORAGE_BOOKMARKS = "tgpt_turn_nav_bookmarks_v121";
-  const STORAGE_NOTES = "tgpt_turn_nav_notes_v121";
-  const STORAGE_TITLES = "tgpt_turn_nav_titles_v121";
+  function getSite() {
+    const host = location.hostname;
+    if (host === "chatgpt.com" || host === "chat.openai.com") return "chatgpt";
+    if (host === "claude.ai") return "claude";
+    return null;
+  }
+
+  const SITE = getSite();
+  if (!SITE) return; // Not on a supported site
+
+  const STORAGE_BOOKMARKS_PREFIX = "tgpt_turn_nav_bookmarks_v122_";
+  const STORAGE_NOTES_PREFIX = "tgpt_turn_nav_notes_v122_";
+  const STORAGE_TITLES_PREFIX = "tgpt_turn_nav_titles_v122_";
+  const STORAGE_GLOBAL_BOOKMARKS = "tgpt_turn_nav_global_bookmarks_v122";
+  const STORAGE_CONV_TITLES = "tgpt_turn_nav_conv_titles_v122";
+  const STORAGE_PENDING_JUMP = "tgpt_turn_nav_pending_jump_v122";
   const STORAGE_SECTIONS = "tgpt_turn_nav_sections_v121";
   const STORAGE_MINI = "tgpt_turn_nav_mini_v121";
   const STORAGE_LAYOUT = "tgpt_turn_nav_layout_v121";
@@ -16,6 +29,52 @@
   const STORAGE_AI_CACHE = "tgpt_turn_nav_ai_cache_v121";
   const STORAGE_AI_MODEL = "tgpt_turn_nav_ai_model_v121";
   const STORAGE_TRACK_CURRENT = "tgpt_turn_nav_track_current_v121";
+
+  function getConversationId() {
+    if (SITE === "chatgpt") {
+      const match = location.pathname.match(/\/(?:c|g)\/([a-f0-9-]+)/i);
+      return match ? match[1] : "__no_conversation__";
+    }
+    if (SITE === "claude") {
+      // Claude URLs: /chat/{uuid}, /project/{uuid}/chat/{uuid}, etc.
+      const segments = location.pathname.split("/").filter(Boolean);
+      for (let i = segments.length - 1; i >= 0; i--) {
+        if (/^[a-f0-9-]{8,}$/i.test(segments[i])) return segments[i];
+      }
+    }
+    return "__no_conversation__";
+  }
+
+  function getConversationTitle() {
+    if (SITE === "claude") {
+      // Claude: title button in header
+      const titleBtn = document.querySelector('[data-testid="chat-title-button"]');
+      if (titleBtn) {
+        const text = (titleBtn.textContent || "").replace(/\s+/g, " ").trim();
+        if (text && text.length > 1) return text.length > 60 ? text.slice(0, 59) + "…" : text;
+      }
+      const pageTitle = document.title || "";
+      const cleaned = pageTitle.replace(/\s*[|–—-]\s*Claude\s*$/i, "").trim();
+      if (cleaned && cleaned !== "Claude" && cleaned.length > 1) return cleaned;
+    }
+
+    if (SITE === "chatgpt") {
+      const pageTitle = document.title || "";
+      const cleaned = pageTitle.replace(/\s*[|–—-]\s*ChatGPT\s*$/i, "").trim();
+      if (cleaned && cleaned !== "ChatGPT" && cleaned.length > 1) return cleaned;
+    }
+
+    // Fallback for both: first user message
+    const userSel = SITE === "claude"
+      ? "[data-testid='user-message']"
+      : "[data-message-author-role='user']";
+    const firstUser = document.querySelector(userSel);
+    if (firstUser) {
+      const text = (firstUser.innerText || "").replace(/\s+/g, " ").trim();
+      if (text) return text.length > 60 ? text.slice(0, 59) + "…" : text;
+    }
+    return "Untitled conversation";
+  }
 
   function storageGet(key, fallback) {
     return new Promise((resolve) => {
@@ -61,11 +120,19 @@
   }
 
   function inferRole(el) {
+    if (SITE === "claude") {
+      if (el.querySelector("[data-testid='user-message']")) return "user";
+      if (el.querySelector("[data-is-streaming]") || el.querySelector(".font-claude-response")) return "assistant";
+      if (el.querySelector(".bg-bg-300.rounded-xl")) return "user";
+      if (el.querySelector(".standard-markdown, .progressive-markdown")) return "assistant";
+      return "assistant";
+    }
+
+    // ChatGPT
     if (
       el.getAttribute("data-message-author-role") === "user" ||
       el.querySelector("[data-message-author-role='user']")
     ) return "user";
-
     if (
       el.getAttribute("data-message-author-role") === "assistant" ||
       el.querySelector("[data-message-author-role='assistant']")
@@ -138,64 +205,38 @@
 
   function summarizeTurn(text, role, prevTurnText = "") {
     const raw = cleanText(text);
-    const prev = cleanText(prevTurnText);
 
     if (!raw) return role === "user" ? "User message" : "Assistant response";
 
     const firstSentence = splitSentences(raw)[0] || raw;
     const first = truncate(stripLeadIns(firstSentence), 72);
 
-    const codeFenceCount = (raw.match(/```/g) || []).length;
+    const sample = raw.slice(0, 500);
+
+    const codeFenceCount = (sample.match(/```/g) || []).length;
     const hasHeavyCode =
       codeFenceCount >= 2 ||
-      /function\s+\w+\s*\(|const\s+\w+\s*=|let\s+\w+\s*=|class\s+\w+|=>|chrome\.|document\.|querySelector|addEventListener|manifest_version/i.test(raw);
+      /function\s+\w+\s*\(|const\s+\w+\s*=|let\s+\w+\s*=|class\s+\w+|=>\s*{|import\s+|export\s+|def\s+\w+|async\s+function/i.test(sample);
 
-    const hasConfigShape =
-      /"manifest_version"\s*:|permissions"\s*:|host_permissions"\s*:|background"\s*:|action"\s*:|manifest_version/i.test(raw);
-
-    const hasUiConstruction =
-      /createElement|appendChild|className\s*=|style\.|innerHTML|textContent|DRAWER_ID|BTN_ID|MINI_ID/i.test(raw);
-
-    const hasNavigationLogic =
-      /scrollIntoView|IntersectionObserver|jumpToTurn|jumpRelative|currentId|observeCurrentTurn/i.test(raw);
-
-    const hasStorageLogic =
-      /chrome\.storage\.local|storageGet|storageSet|localStorage|getItem|setItem/i.test(raw);
-
-    const hasRefreshLogic =
-      /MutationObserver|refreshTurns|observeDOM|setTimeout\(refreshTurns/i.test(raw);
-
-    const hasMessaging =
-      /chrome\.runtime\.onMessage|chrome\.tabs\.sendMessage|sendMessage|onClicked/i.test(raw);
-
-    const asksQuestion = raw.includes("?");
-    const asksForBuild = /\b(build|create|make|implement|add|update|patch|fix)\b/i.test(raw);
-    const asksForWriting = /\b(rewrite|draft|respond|email|post|prompt)\b/i.test(raw);
-    const asksForExplanation = /\b(how|why|what would it take|is there another way|can you explain)\b/i.test(raw);
+    const asksQuestion = sample.includes("?");
+    const asksForBuild = /\b(build|create|make|implement|add|update|patch|fix|write|generate)\b/i.test(sample);
+    const asksForWriting = /\b(rewrite|draft|respond|email|post|prompt|summarize|explain)\b/i.test(sample);
+    const asksForExplanation = /\b(how|why|what would it take|is there another way|can you explain|what is|what are)\b/i.test(sample);
 
     if (role === "user") {
-      if (asksQuestion && asksForExplanation) return truncate("Asks for approach: " + first, 78);
+      if (asksQuestion && asksForExplanation) return truncate("Asks: " + first, 78);
       if (asksQuestion) return truncate("Asks: " + first.replace(/\?+$/, ""), 78);
-      if (asksForBuild) return truncate("Requests implementation: " + first, 78);
-      if (asksForWriting) return truncate("Requests writing help: " + first, 78);
+      if (asksForBuild) return truncate("Requests: " + first, 78);
+      if (asksForWriting) return truncate("Requests: " + first, 78);
       return truncate("User: " + first, 78);
     }
 
     if (role === "assistant") {
-      if (hasConfigShape) return "Defines extension manifest or config";
-      if (hasMessaging) return "Implements extension messaging or toggle flow";
-      if (hasStorageLogic) return "Adds storage-backed state handling";
-      if (hasRefreshLogic) return "Implements refresh/update logic";
-      if (hasNavigationLogic) return "Adds turn navigation behavior";
-      if (hasUiConstruction) return "Builds injected navigator UI";
-      if (hasHeavyCode && /content\.js|background\.js|manifest\.json/i.test(prev + " " + raw)) {
-        return "Provides implementation for requested extension file";
-      }
-      if (hasHeavyCode) return "Provides implementation details";
-      if (/\b(recommend|best approach|right move|should)\b/i.test(raw)) {
+      if (hasHeavyCode) return truncate("Implements: " + first, 78);
+      if (/\b(recommend|suggest|best approach|should|consider)\b/i.test(sample)) {
         return truncate("Recommends: " + first, 78);
       }
-      if (/\b(explain|because|reason|tradeoff|limit)\b/i.test(raw)) {
+      if (/\b(explain|because|reason|tradeoff|the issue|the problem)\b/i.test(sample)) {
         return truncate("Explains: " + first, 78);
       }
       return truncate("Assistant: " + first, 78);
@@ -205,13 +246,37 @@
   }
 
   function getMessageNodes() {
+    if (SITE === "claude") {
+      const nodes = Array.from(document.querySelectorAll("[data-test-render-count]"));
+      if (nodes.length) return nodes;
+      // Fallback: find user/assistant markers and walk up
+      const markers = Array.from(document.querySelectorAll(
+        "[data-testid='user-message'], [data-is-streaming]"
+      ));
+      if (markers.length) {
+        const containers = new Set();
+        markers.forEach((node) => {
+          let parent = node.parentElement;
+          for (let i = 0; i < 5 && parent; i++) {
+            if (parent.parentElement && parent.parentElement.children.length > 2) {
+              containers.add(parent);
+              break;
+            }
+            parent = parent.parentElement;
+          }
+        });
+        return Array.from(containers);
+      }
+      return [];
+    }
+
+    // ChatGPT
     const selectors = [
       "article",
       "[data-message-author-role]",
       "main [data-testid*='conversation-turn']",
       "main article"
     ];
-
     for (const selector of selectors) {
       const nodes = Array.from(document.querySelectorAll(selector));
       if (nodes.length) return nodes;
@@ -228,10 +293,24 @@
       if (!node || seen.has(node)) return;
       seen.add(node);
 
-      const text = getText(node);
+      const role = inferRole(node);
+      let text = "";
+
+      if (SITE === "claude") {
+        // Extract from specific content areas to avoid tool-use labels, timestamps, etc.
+        if (role === "user") {
+          const msgEl = node.querySelector("[data-testid='user-message']");
+          text = getText(msgEl || node);
+        } else {
+          const mdEl = node.querySelector(".standard-markdown, .progressive-markdown");
+          text = getText(mdEl || node.querySelector(".font-claude-response") || node);
+        }
+      } else {
+        text = getText(node);
+      }
+
       if (!text || text.length < 2) return;
 
-      const role = inferRole(node);
       const prevTurnText = turns.length ? turns[turns.length - 1].text : "";
       const turnId = "turn-" + (idx + 1);
 
@@ -514,6 +593,48 @@
         padding: 5px 7px;
       }
 
+      #${DRAWER_ID} .tgpt-snippet {
+        margin-top: 3px;
+        font-size: 11px;
+        line-height: 1.3;
+        color: #777;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+
+      #${DRAWER_ID} .tgpt-conv-header {
+        font-size: 12px;
+        font-weight: 700;
+        color: #333;
+        padding: 12px 2px 4px;
+        border-bottom: 1px solid #eee;
+        margin-bottom: 6px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      #${DRAWER_ID} .tgpt-conv-header .tgpt-conv-badge {
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: .04em;
+        color: #999;
+        font-weight: 600;
+      }
+
+      #${DRAWER_ID} .tgpt-item.cross-conv {
+        border-style: dashed;
+      }
+
+      #${DRAWER_ID} .tgpt-global-time {
+        font-size: 10px;
+        color: #999;
+        margin-left: auto;
+        white-space: nowrap;
+      }
+
       #${MINI_ID} {
         position: fixed;
         right: 8px;
@@ -565,6 +686,8 @@
       return;
     }
 
+    const convId = getConversationId();
+
     const state = {
       open: false,
       filter: "all",
@@ -573,9 +696,10 @@
       currentId: null,
       io: null,
       keyHandler: null,
-      bookmarks: await storageGet(STORAGE_BOOKMARKS, {}),
-      notes: await storageGet(STORAGE_NOTES, {}),
-      titles: await storageGet(STORAGE_TITLES, {}),
+      convId,
+      bookmarks: await storageGet(STORAGE_BOOKMARKS_PREFIX + convId, {}),
+      notes: await storageGet(STORAGE_NOTES_PREFIX + convId, {}),
+      titles: await storageGet(STORAGE_TITLES_PREFIX + convId, {}),
       sections: await storageGet(STORAGE_SECTIONS, {
         bookmarked: true,
         user: true,
@@ -588,7 +712,10 @@
       aiModel: await storageGet(STORAGE_AI_MODEL, ""),
       aiCache: await storageGet(STORAGE_AI_CACHE, {}),
       aiInFlight: new Set(),
-      trackCurrent: await storageGet(STORAGE_TRACK_CURRENT, false)
+      trackCurrent: await storageGet(STORAGE_TRACK_CURRENT, false),
+      globalBookmarks: await storageGet(STORAGE_GLOBAL_BOOKMARKS, {}),
+      convTitles: await storageGet(STORAGE_CONV_TITLES, {}),
+      pendingJump: await storageGet(STORAGE_PENDING_JUMP, null)
     };
 
     let drawer, listEl, searchEl, chips = {}, mini;
@@ -680,7 +807,7 @@
       }
 
       if (changed) {
-        await storageSet(STORAGE_TITLES, state.titles);
+        await storageSet(STORAGE_TITLES_PREFIX + state.convId, state.titles);
         if (state.open) renderList();
       }
     }
@@ -711,9 +838,31 @@
     }
 
     async function toggleBookmark(turnId) {
-      if (state.bookmarks[turnId]) delete state.bookmarks[turnId];
-      else state.bookmarks[turnId] = true;
-      await storageSet(STORAGE_BOOKMARKS, state.bookmarks);
+      const globalKey = state.convId + ":" + turnId;
+
+      if (state.bookmarks[turnId]) {
+        delete state.bookmarks[turnId];
+        delete state.globalBookmarks[globalKey];
+      } else {
+        state.bookmarks[turnId] = true;
+
+        const turn = state.turns.find((t) => t.id === turnId);
+        state.globalBookmarks[globalKey] = {
+          convId: state.convId,
+          site: SITE,
+          convTitle: state.convTitles[state.convId] || getConversationTitle(),
+          turnId,
+          turnIndex: turn ? turn.index : 0,
+          role: turn ? turn.role : "unknown",
+          label: turn ? effectiveLabel(turn) : turnId,
+          snippet: turn ? truncate(turn.text, 120) : "",
+          note: state.notes[turnId] || "",
+          ts: Date.now()
+        };
+      }
+
+      await storageSet(STORAGE_BOOKMARKS_PREFIX + state.convId, state.bookmarks);
+      await storageSet(STORAGE_GLOBAL_BOOKMARKS, state.globalBookmarks);
       renderAll();
     }
 
@@ -723,7 +872,14 @@
       if (next === null) return;
       if (next.trim()) state.notes[turnId] = next.trim();
       else delete state.notes[turnId];
-      await storageSet(STORAGE_NOTES, state.notes);
+      await storageSet(STORAGE_NOTES_PREFIX + state.convId, state.notes);
+
+      // Sync note into global bookmark if it exists
+      const gk = state.convId + ":" + turnId;
+      if (state.globalBookmarks[gk]) {
+        state.globalBookmarks[gk].note = state.notes[turnId] || "";
+        await storageSet(STORAGE_GLOBAL_BOOKMARKS, state.globalBookmarks);
+      }
       renderAll();
     }
 
@@ -735,8 +891,57 @@
       if (next === null) return;
       if (next.trim()) state.titles[turnId] = next.trim();
       else delete state.titles[turnId];
-      await storageSet(STORAGE_TITLES, state.titles);
+      await storageSet(STORAGE_TITLES_PREFIX + state.convId, state.titles);
+
+      // Sync label into global bookmark if it exists
+      const gk = state.convId + ":" + turnId;
+      if (state.globalBookmarks[gk]) {
+        state.globalBookmarks[gk].label = effectiveLabel(turn);
+        await storageSet(STORAGE_GLOBAL_BOOKMARKS, state.globalBookmarks);
+      }
       renderAll();
+    }
+
+    async function updateConvTitle() {
+      if (state.convId === "__no_conversation__") return;
+      const title = getConversationTitle();
+      if (title && title !== state.convTitles[state.convId]) {
+        state.convTitles[state.convId] = title;
+        await storageSet(STORAGE_CONV_TITLES, state.convTitles);
+      }
+    }
+
+    function relativeTime(ts) {
+      if (!ts) return "";
+      const diff = Date.now() - ts;
+      const mins = Math.floor(diff / 60000);
+      if (mins < 1) return "just now";
+      if (mins < 60) return mins + "m ago";
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24) return hrs + "h ago";
+      const days = Math.floor(hrs / 24);
+      if (days < 30) return days + "d ago";
+      return Math.floor(days / 30) + "mo ago";
+    }
+
+    function convUrl(convId, site) {
+      if (site === "claude") return "https://claude.ai/chat/" + convId;
+      return "https://chatgpt.com/c/" + convId;
+    }
+
+    function navigateToBookmark(entry) {
+      if (entry.convId === state.convId) {
+        // Same conversation — just jump to the turn
+        const turn = state.turns.find((t) => t.id === entry.turnId);
+        if (turn) jumpToTurn(turn);
+        return;
+      }
+
+      // Different conversation — persist pending jump and navigate
+      const jump = { convId: entry.convId, turnId: entry.turnId };
+      state.pendingJump = jump;
+      storageSet(STORAGE_PENDING_JUMP, jump);
+      location.href = convUrl(entry.convId, entry.site || SITE);
     }
 
     function filteredTurns() {
@@ -812,24 +1017,61 @@
     }
 
     async function exportBookmarks() {
-      const marked = state.turns.filter((t) => state.bookmarks[t.id]);
-      if (!marked.length) {
-        alert("No bookmarked turns yet.");
-        return;
-      }
+      let content;
 
-      const content = marked.map((t) => {
-        const parts = [];
-        parts.push(`# Turn ${t.index} (${t.role})`);
-        parts.push(`Title: ${effectiveLabel(t)}`);
-        if (state.notes[t.id]) parts.push(`Note: ${state.notes[t.id]}`);
-        parts.push("");
-        parts.push(t.text);
-        parts.push("");
-        parts.push("----");
-        parts.push("");
-        return parts.join("\n");
-      }).join("\n");
+      if (state.filter === "all_bookmarks") {
+        // Export all global bookmarks grouped by conversation
+        const entries = Object.values(state.globalBookmarks)
+          .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+
+        if (!entries.length) {
+          alert("No bookmarks across any conversation yet.");
+          return;
+        }
+
+        const groups = {};
+        for (const e of entries) {
+          const cid = e.convId || "__unknown__";
+          if (!groups[cid]) groups[cid] = [];
+          groups[cid].push(e);
+        }
+
+        content = Object.entries(groups).map(([cid, items]) => {
+          const convTitle = state.convTitles[cid] || items[0]?.convTitle || cid;
+          const lines = [`## ${convTitle}`, ""];
+          for (const e of items.sort((a, b) => (a.turnIndex || 0) - (b.turnIndex || 0))) {
+            lines.push(`# Turn ${e.turnIndex || "?"} (${e.role})`);
+            lines.push(`Label: ${e.label || e.turnId}`);
+            if (e.note) lines.push(`Note: ${e.note}`);
+            if (e.snippet) lines.push(`Snippet: ${e.snippet}`);
+            lines.push(`Link: ${convUrl(e.convId, e.site || SITE)}`);
+            lines.push("");
+            lines.push("----");
+            lines.push("");
+          }
+          return lines.join("\n");
+        }).join("\n");
+      } else {
+        // Export bookmarks from current conversation
+        const marked = state.turns.filter((t) => state.bookmarks[t.id]);
+        if (!marked.length) {
+          alert("No bookmarked turns yet.");
+          return;
+        }
+
+        content = marked.map((t) => {
+          const parts = [];
+          parts.push(`# Turn ${t.index} (${t.role})`);
+          parts.push(`Title: ${effectiveLabel(t)}`);
+          if (state.notes[t.id]) parts.push(`Note: ${state.notes[t.id]}`);
+          parts.push("");
+          parts.push(t.text);
+          parts.push("");
+          parts.push("----");
+          parts.push("");
+          return parts.join("\n");
+        }).join("\n");
+      }
 
       try {
         await navigator.clipboard.writeText(content);
@@ -963,6 +1205,161 @@
       container.appendChild(sec);
     }
 
+    function renderGlobalBookmarks(container) {
+      const entries = Object.values(state.globalBookmarks)
+        .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+
+      if (!entries.length) {
+        const empty = document.createElement("div");
+        empty.style.padding = "18px 6px";
+        empty.style.color = "#666";
+        empty.textContent = "No bookmarks across any conversation yet.";
+        container.appendChild(empty);
+        return;
+      }
+
+      // Apply search filter
+      const q = state.search ? state.search.toLowerCase() : "";
+      const filtered = q
+        ? entries.filter((e) =>
+            (e.label || "").toLowerCase().includes(q) ||
+            (e.snippet || "").toLowerCase().includes(q) ||
+            (e.convTitle || "").toLowerCase().includes(q) ||
+            (e.note || "").toLowerCase().includes(q)
+          )
+        : entries;
+
+      if (!filtered.length) {
+        const empty = document.createElement("div");
+        empty.style.padding = "18px 6px";
+        empty.style.color = "#666";
+        empty.textContent = "No bookmarks match your search.";
+        container.appendChild(empty);
+        return;
+      }
+
+      // Group by conversation
+      const groups = {};
+      for (const entry of filtered) {
+        const cid = entry.convId || "__unknown__";
+        if (!groups[cid]) groups[cid] = [];
+        groups[cid].push(entry);
+      }
+
+      // Sort groups by most recent bookmark in each
+      const sortedGroups = Object.entries(groups).sort((a, b) => {
+        const aMax = Math.max(...a[1].map((e) => e.ts || 0));
+        const bMax = Math.max(...b[1].map((e) => e.ts || 0));
+        return bMax - aMax;
+      });
+
+      for (const [cid, groupEntries] of sortedGroups) {
+        const isCurrent = cid === state.convId;
+        const convTitle = state.convTitles[cid] || groupEntries[0]?.convTitle || "Unknown conversation";
+
+        const header = document.createElement("div");
+        header.className = "tgpt-conv-header";
+        header.textContent = truncate(convTitle, 50);
+
+        const siteBadge = document.createElement("span");
+        siteBadge.className = "tgpt-conv-badge";
+        siteBadge.textContent = groupEntries[0]?.site === "claude" ? "Claude" : "ChatGPT";
+        header.appendChild(siteBadge);
+
+        if (isCurrent) {
+          const badge = document.createElement("span");
+          badge.className = "tgpt-conv-badge";
+          badge.textContent = "current";
+          header.appendChild(badge);
+        }
+
+        container.appendChild(header);
+
+        // Sort entries within group by turn index
+        groupEntries.sort((a, b) => (a.turnIndex || 0) - (b.turnIndex || 0));
+
+        for (const entry of groupEntries) {
+          const item = document.createElement("div");
+          item.className = "tgpt-item" + (isCurrent ? "" : " cross-conv");
+
+          const row = document.createElement("div");
+          row.className = "tgpt-row";
+
+          const main = document.createElement("div");
+          main.className = "tgpt-main";
+          main.onclick = () => navigateToBookmark(entry);
+
+          const meta = document.createElement("div");
+          meta.className = "tgpt-meta";
+
+          const roleLabel = entry.role === "user" ? "User" : "Assistant";
+          const timeLabel = relativeTime(entry.ts);
+          meta.textContent = roleLabel + " • Turn " + (entry.turnIndex || "?");
+
+          if (timeLabel) {
+            const timeSpan = document.createElement("span");
+            timeSpan.className = "tgpt-global-time";
+            timeSpan.textContent = timeLabel;
+            meta.appendChild(timeSpan);
+          }
+
+          const label = document.createElement("div");
+          label.className = "tgpt-label";
+          label.textContent = entry.label || entry.turnId;
+
+          main.appendChild(meta);
+          main.appendChild(label);
+
+          if (entry.snippet) {
+            const snippetEl = document.createElement("div");
+            snippetEl.className = "tgpt-snippet";
+            snippetEl.textContent = entry.snippet;
+            main.appendChild(snippetEl);
+          }
+
+          const actions = document.createElement("div");
+          actions.className = "tgpt-actions";
+
+          const remove = document.createElement("button");
+          remove.className = "tgpt-icon-btn";
+          remove.textContent = "✕";
+          remove.title = "Remove bookmark";
+          remove.onclick = (e) => {
+            e.stopPropagation();
+            removeGlobalBookmark(entry.convId, entry.turnId);
+          };
+
+          actions.appendChild(remove);
+          row.appendChild(main);
+          row.appendChild(actions);
+          item.appendChild(row);
+
+          if (entry.note) {
+            const noteBox = document.createElement("div");
+            noteBox.className = "tgpt-note";
+            noteBox.textContent = entry.note;
+            item.appendChild(noteBox);
+          }
+
+          container.appendChild(item);
+        }
+      }
+    }
+
+    async function removeGlobalBookmark(convId, turnId) {
+      const gk = convId + ":" + turnId;
+      delete state.globalBookmarks[gk];
+      await storageSet(STORAGE_GLOBAL_BOOKMARKS, state.globalBookmarks);
+
+      // Also remove from per-conversation bookmarks if it's the current conversation
+      if (convId === state.convId && state.bookmarks[turnId]) {
+        delete state.bookmarks[turnId];
+        await storageSet(STORAGE_BOOKMARKS_PREFIX + state.convId, state.bookmarks);
+      }
+
+      renderAll();
+    }
+
     function renderList() {
       if (!listEl) return;
       listEl.innerHTML = "";
@@ -970,6 +1367,12 @@
       Object.keys(chips).forEach((key) => {
         chips[key].classList.toggle("active", state.filter === key);
       });
+
+      // Global bookmarks view — shows all bookmarks across conversations
+      if (state.filter === "all_bookmarks") {
+        renderGlobalBookmarks(listEl);
+        return;
+      }
 
       const items = filteredTurns();
       if (!items.length) {
@@ -1059,6 +1462,19 @@
       state.turns.forEach((t) => state.io.observe(t.node));
     }
 
+    async function reloadConversationState() {
+      const newConvId = getConversationId();
+      if (newConvId === state.convId) return;
+
+      state.convId = newConvId;
+      state.bookmarks = await storageGet(STORAGE_BOOKMARKS_PREFIX + newConvId, {});
+      state.notes = await storageGet(STORAGE_NOTES_PREFIX + newConvId, {});
+      state.titles = await storageGet(STORAGE_TITLES_PREFIX + newConvId, {});
+      state.globalBookmarks = await storageGet(STORAGE_GLOBAL_BOOKMARKS, {});
+      state.convTitles = await storageGet(STORAGE_CONV_TITLES, {});
+      state.currentId = null;
+    }
+
     function refreshTurns() {
       const previousCurrent = state.currentId;
       state.turns = getConversationTurns();
@@ -1073,6 +1489,22 @@
 
       if (!state.turns.find((t) => t.id === previousCurrent)) {
         state.currentId = state.turns[0].id;
+      }
+
+      // Cache the conversation title for global bookmarks
+      updateConvTitle();
+
+      // Handle pending jump from a cross-conversation bookmark click
+      if (state.pendingJump && state.pendingJump.convId === state.convId) {
+        const targetId = state.pendingJump.turnId;
+        state.pendingJump = null;
+        storageSet(STORAGE_PENDING_JUMP, null);
+        const target = state.turns.find((t) => t.id === targetId);
+        if (target) {
+          state.currentId = target.id;
+          // Delay scroll so the DOM is settled
+          setTimeout(() => jumpToTurn(target), 200);
+        }
       }
 
       renderAll();
@@ -1145,13 +1577,14 @@
       const filters = document.createElement("div");
       filters.className = "tgpt-filters";
 
-      ["all", "user", "assistant", "bookmarked"].forEach((key) => {
+      ["all", "user", "assistant", "bookmarked", "all_bookmarks"].forEach((key) => {
         const chip = document.createElement("button");
         chip.className = "tgpt-chip";
         chip.textContent =
           key === "all" ? "All" :
           key === "user" ? "User" :
-          key === "assistant" ? "Assistant" : "Bookmarked";
+          key === "assistant" ? "Assistant" :
+          key === "bookmarked" ? "Bookmarked" : "All ★";
         chip.onclick = () => {
           state.filter = key;
           renderList();
@@ -1293,7 +1726,7 @@
     }
 
     function startUrlPolling() {
-      // ChatGPT is an SPA — URL changes happen via the History API with no
+      // Both ChatGPT and Claude are SPAs — URL changes happen via the History API with no
       // page reload.  Poll for href changes and auto-refresh when detected.
       if (urlPollInterval) clearInterval(urlPollInterval);
 
@@ -1301,7 +1734,8 @@
         if (location.href !== lastKnownUrl) {
           lastKnownUrl = location.href;
           // Small delay so the new conversation DOM has time to mount
-          setTimeout(() => {
+          setTimeout(async () => {
+            await reloadConversationState();
             refreshTurns();
             // If the DOM wasn't ready yet, retry once more
             if (!state.turns.length) {
